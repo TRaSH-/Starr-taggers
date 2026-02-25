@@ -12,7 +12,7 @@
 # ========== CONFIGURATION ==========
 # Enable/disable tag categories (true/false)
 ENABLE_HDR_FORMATS_TAGS=true    # SDR, PQ, HDR10, HDR10+, DV tags
-ENABLE_NO_DV_TAGS=false         # No-DV tag
+ENABLE_NO_DV_TAGS=false         # No-DV tags
 ENABLE_PROFILE_TAGS=true        # MEL, FEL tags
 ENABLE_PROFILE8_TAGS=false      # DVProfile8 tags
 ENABLE_CM_TAGS=true             # CM2, CM4 tags
