@@ -1,0 +1,97 @@
+# ========== CONFIGURATION ==========
+# Config for tagarr_import.sh — Event-Driven Radarr Tagger with Discovery
+#
+# This file controls all behavior of tagarr_import.sh. The script runs as a
+# Radarr Connect handler (On Download / On Upgrade / On File Delete). It tags
+# individual movies by release group when quality and audio filters match,
+# optionally syncs tags to a secondary instance, and discovers new groups.
+#
+# Separate from tagarr.conf — both configs are independent and can have
+# different release groups, webhooks, and filter settings.
+#
+# Notification behavior:
+#   - Tagged movie   → Discord embed (orange) with tags and poster
+#   - Discovered     → Discord embed (gold) with new group info
+#   - No match       → Silent (no notification)
+#   - Test event     → Confirmation embed with version and status
+
+# Copy this file to tagarr_import.conf and fill in your values.
+
+# === PRIMARY RADARR ===
+# The Radarr instance this script runs in (Connect > Custom Script).
+# Use container hostname when running inside Docker, IP when running from host.
+PRIMARY_RADARR_URL="http://localhost:7878"
+PRIMARY_RADARR_API_KEY="your-api-key-here"
+PRIMARY_RADARR_NAME="Radarr"
+
+# === SECONDARY RADARR ===
+# Optional second Radarr instance. When enabled, tags are mirrored from
+# primary to secondary for any movie that exists in both (matched by TMDb ID).
+ENABLE_SYNC_TO_SECONDARY=false
+SECONDARY_RADARR_URL="http://localhost:7979"
+SECONDARY_RADARR_API_KEY="your-api-key-here"
+SECONDARY_RADARR_NAME="Radarr 4K"
+
+# === RELEASE GROUPS ===
+# Each entry defines a release group to tag. Format:
+#   "search_string:tag_name:display_name:mode"
+#
+# Fields:
+#   search_string — Lowercase string matched against releaseGroup field (word boundary)
+#   tag_name      — Tag label created in Radarr (lowercase, no spaces)
+#   display_name  — Human-readable name shown in logs and Discord
+#   mode          — "filtered" requires quality+audio match; "simple" tags any match
+#
+# Commented entries (#) are ignored for tagging but counted as "known" by
+# discovery, so the same group won't be re-discovered.
+RELEASE_GROUPS=(
+    "thefarm:thefarm:TheFarm:filtered"         # Only MA/Play + lossless
+    "flux:flux:FLUX:filtered"                  # Only MA/Play + lossless
+    "sic:sic:SIC:filtered"                     # Only MA/Play + lossless
+    "126811:126811:126811:filtered"            # Only MA/Play + lossless
+    "xebec:xebec:XEBEC:filtered"               # Only MA/Play + lossless
+    #"groupname:tagname:DisplayName:filtered"
+)
+
+# === QUALITY FILTERS ===
+# When ENABLE_QUALITY_FILTER=true, "filtered" mode groups only tag movies
+# whose filename contains one of the enabled quality sources.
+ENABLE_QUALITY_FILTER=true
+ENABLE_MA_WEBDL=true       # Movies Anywhere WEB-DL
+ENABLE_PLAY_WEBDL=true     # Google Play WEB-DL
+
+# === AUDIO FILTERS ===
+# When ENABLE_AUDIO_FILTER=true, "filtered" mode groups only tag movies
+# whose filename contains one of the enabled lossless audio codecs.
+ENABLE_AUDIO_FILTER=true
+ENABLE_TRUEHD=true         # Dolby TrueHD (without Atmos)
+ENABLE_TRUEHD_ATMOS=true   # Dolby TrueHD Atmos
+ENABLE_DTS_X=true          # DTS:X
+ENABLE_DTS_HD_MA=true      # DTS-HD Master Audio
+
+# === DISCOVERY ===
+# When enabled, movies that pass all quality+audio filters but whose release
+# group is not in RELEASE_GROUPS are flagged as "discovered". New groups are
+# written to this config as commented entries for manual review.
+ENABLE_DISCOVERY=true
+
+# === DISCORD NOTIFICATIONS ===
+# Send per-movie notifications when a movie is tagged or a new group is
+# discovered. Silent when nothing happens (no tag applied, no discovery).
+DISCORD_ENABLED=false
+DISCORD_WEBHOOK_URL=""
+
+# === DEBUG ===
+# When enabled, logs every filter decision for each event:
+#   - Release group, quality, size, scene name
+#   - Which groups matched and via which field (filename/scene/releaseGroup)
+#   - Quality and audio filter pass/fail per matched group
+#   - Skip reasons for non-matching groups
+#   - Discovery decisions (unknown/known, filter pass/fail)
+# Useful for verifying the script is working when no notifications are sent.
+ENABLE_DEBUG=false
+
+# === LOGGING ===
+# Main log file. Rotated automatically at 2 MiB (keeps one .old backup).
+ENABLE_LOGGING=true
+LOG_FILE="${SCRIPT_DIR}/logs/tagarr_import.log"
