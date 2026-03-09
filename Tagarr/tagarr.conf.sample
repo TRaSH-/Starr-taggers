@@ -1,9 +1,10 @@
 # ========== CONFIGURATION ==========
-# Config for tagarr.sh — Radarr Release Group Tagger with Discovery
+# Config for tagarr.sh — Batch Radarr Release Group Tagger
 #
-# This file controls all behavior of tagarr.sh. The script scans movies in
-# Radarr, tags them by release group when quality and audio filters match,
-# optionally syncs tags to a secondary instance, and discovers new groups.
+# Scans all movies and tags by release group with quality/audio filtering.
+# See README.md for full documentation and usage examples.
+#
+# Flags: --dry-run | --tag NAME | --discover | --help
 
 # Copy this file to tagarr.conf and fill in your values.
 

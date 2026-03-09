@@ -2,7 +2,7 @@
 
 # -----------------------------------------------------------------------------
 # Tagarr Import — Event-Driven Radarr Tagger with Discovery
-# Version: 1.0.0
+# Version: 1.3.1
 #
 # Radarr Connect handler that tags individual movies on import, upgrade, or
 # file delete events. Tags are based on release group, quality source
@@ -33,7 +33,7 @@
 # Test with a single movie before enabling as a Radarr Connect handler.
 # -----------------------------------------------------------------------------
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.3.1"
 
 ########################################
 # CONFIG LOADING
@@ -73,7 +73,6 @@ done < "$CONFIG_FILE"
 
 EVENT_TYPE="${radarr_eventtype:-Test}"
 MOVIE_ID="${radarr_movie_id:-0}"
-MOVIE_FILE_PATH="${radarr_moviefile_path:-}"
 MOVIE_FILE_RELATIVE="${radarr_moviefile_relativepath:-}"
 MOVIE_FILE_SCENE="${radarr_moviefile_scenename:-}"
 
@@ -104,6 +103,52 @@ if [ "${ENABLE_LOGGING:-true}" = "true" ] && [ -n "${LOG_FILE:-}" ] && [ -f "$LO
 fi
 
 ################################################################################
+# HANDLE RADARR TEST EVENT (early exit — no API calls needed)
+################################################################################
+
+if [ "$EVENT_TYPE" = "Test" ]; then
+    log "INFO" "============================================"
+    log "INFO" "Tagarr Import v${SCRIPT_VERSION}"
+    log "INFO" "Event: Test"
+    log "INFO" "============================================"
+
+    if [ "${DISCORD_ENABLED:-false}" = "true" ] && [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+        log "INFO" "Sending Discord test notification..."
+        payload=$(jq -n \
+            --argjson color 16753920 \
+            --arg footer_text "Tagarr Import v${SCRIPT_VERSION} by ProphetSe7en" \
+            --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+            '{
+                embeds: [{
+                    title: "Tagarr Import v'"${SCRIPT_VERSION}"' — Test OK",
+                    color: $color,
+                    fields: [
+                        { name: "Status", value: "Connection successful", inline: true },
+                        { name: "Discovery", value: "'"${ENABLE_DISCOVERY:-false}"'", inline: true }
+                    ],
+                    footer: { text: $footer_text },
+                    timestamp: $timestamp
+                }]
+            }')
+
+        response=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+
+        http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d: -f2)
+
+        if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
+            log "INFO" "Discord test notification sent successfully"
+        else
+            log "WARN" "Discord test notification failed (HTTP $http_code)"
+        fi
+    fi
+
+    log "INFO" "Script completed successfully"
+    exit 0
+fi
+
+################################################################################
 # HANDLE MOVIE FILE DELETE EVENT
 ################################################################################
 
@@ -126,7 +171,7 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
     MOVIE_TITLE=$(echo "$movie_json" | jq -r '.title')
     MOVIE_YEAR=$(echo "$movie_json" | jq -r '.year')
     MOVIE_TMDB_ID=$(echo "$movie_json" | jq -r '.tmdbId')
-    MOVIE_CURRENT_TAGS=$(echo "$movie_json" | jq -r '.tags')
+    MOVIE_CURRENT_TAGS=$(echo "$movie_json" | jq -r '(.tags // [])')
 
     log "INFO" "Movie: $MOVIE_TITLE ($MOVIE_YEAR)"
 
@@ -138,7 +183,7 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
 
         # Get tag ID in primary
         primary_tag_id=$(curl -s "${PRIMARY_RADARR_API_URL}/tag?apikey=${PRIMARY_RADARR_API_KEY}" | \
-            jq -r ".[] | select(.label == \"${TAG_NAME}\") | .id")
+            jq -r "(.// []) | .[] | select(.label == \"${TAG_NAME}\") | .id")
 
         if [ -n "$primary_tag_id" ]; then
             managed_tag_ids+=("$primary_tag_id")
@@ -148,7 +193,7 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
     # Check if movie has any managed tags
     has_managed_tags=false
     for tag_id in "${managed_tag_ids[@]}"; do
-        if echo "$MOVIE_CURRENT_TAGS" | jq -e "contains([${tag_id}])" > /dev/null 2>&1; then
+        if echo "$MOVIE_CURRENT_TAGS" | jq -e "(. // []) | contains([${tag_id}])" > /dev/null 2>&1; then
             has_managed_tags=true
             break
         fi
@@ -161,11 +206,11 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
 
         # Get fresh movie object
         movie_full=$(curl -s "${PRIMARY_RADARR_API_URL}/movie/${MOVIE_ID}?apikey=${PRIMARY_RADARR_API_KEY}")
-        current_tags=$(echo "$movie_full" | jq -r '.tags')
+        current_tags=$(echo "$movie_full" | jq -r '(.tags // [])')
 
         # Remove all managed tags
         for tag_id in "${managed_tag_ids[@]}"; do
-            current_tags=$(echo "$current_tags" | jq "del(.[] | select(. == ${tag_id}))")
+            current_tags=$(echo "$current_tags" | jq "(. // []) | del(.[] | select(. == ${tag_id}))")
         done
 
         # Update movie
@@ -183,11 +228,11 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
 
             # Find movie in secondary
             secondary_movie=$(curl -s "${SECONDARY_RADARR_API_URL}/movie?apikey=${SECONDARY_RADARR_API_KEY}" | \
-                jq -c ".[] | select(.tmdbId == ${MOVIE_TMDB_ID})")
+                jq -c "(. // []) | .[] | select(.tmdbId == ${MOVIE_TMDB_ID})")
 
             if [ -n "$secondary_movie" ]; then
                 secondary_movie_id=$(echo "$secondary_movie" | jq -r '.id')
-                secondary_current_tags=$(echo "$secondary_movie" | jq -r '.tags')
+                secondary_current_tags=$(echo "$secondary_movie" | jq -r '(.tags // [])')
 
                 log "INFO" "Found movie in $SECONDARY_RADARR_NAME (ID: $secondary_movie_id)"
 
@@ -196,7 +241,7 @@ if [ "$EVENT_TYPE" = "MovieFileDelete" ] || [ "$EVENT_TYPE" = "MovieFileDeleteFo
                     TAG_NAME=$(echo "$tag_config" | cut -d: -f2)
 
                     secondary_tag_id=$(curl -s "${SECONDARY_RADARR_API_URL}/tag?apikey=${SECONDARY_RADARR_API_KEY}" | \
-                        jq -r ".[] | select(.label == \"${TAG_NAME}\") | .id")
+                        jq -r "(. // []) | .[] | select(.label == \"${TAG_NAME}\") | .id")
 
                     if [ -n "$secondary_tag_id" ]; then
                         secondary_current_tags=$(echo "$secondary_current_tags" | jq "del(.[] | select(. == ${secondary_tag_id}))")
@@ -235,21 +280,20 @@ check_quality_match() {
     local f="$1"
     [ "$ENABLE_QUALITY_FILTER" != "true" ] && return 0
 
-    # STRICT: Only match MA/Play WEB-DL patterns
-    # Uses word boundaries (\b) to prevent matching "AMZN" as "MA" or "IMAX" as "MA"
-    # Supports various separators: . - _
-    # Pattern: (word boundary)(ma|play)(separator)web(dl variants)(separator)
+    # Match MA/Play WEB-DL patterns across naming schemes:
+    #   Standard:  MA.WEB-DL  MA-WEBDL  MA_WEB.DL
+    #   Bracket:   [MA][WEBDL-2160p]  [MA][WEB-DL]
+    # Separator between source and WEB: . - _ ][ or ]\s*[
+    # Uses word boundaries (\b) to prevent "AMZN" matching as "MA" or "IMAX" as "MA"
 
     if [ "$ENABLE_MA_WEBDL" = "true" ]; then
-        # Match: MA.WEBDL- or MA-WEBDL. or MA_WEBDL- or MA.WEB-DL. etc
-        if echo "$f" | grep -Eqi '\bma[._-]web([-.]?dl)?[._-]'; then
+        if echo "$f" | grep -Eqi '\bma(\]?\s*\[?|[._-])web([-.]?dl)?'; then
             return 0
         fi
     fi
 
     if [ "$ENABLE_PLAY_WEBDL" = "true" ]; then
-        # Match: Play.WEBDL- or Play-WEBDL. or Play_WEBDL- or Play.WEB-DL. etc
-        if echo "$f" | grep -Eqi '\bplay[._-]web([-.]?dl)?[._-]'; then
+        if echo "$f" | grep -Eqi '\bplay(\]?\s*\[?|[._-])web([-.]?dl)?'; then
             return 0
         fi
     fi
@@ -293,12 +337,201 @@ check_audio_match() {
     # DTS-HD MA check - supports various separators
     if [ "$ENABLE_DTS_HD_MA" = "true" ]; then
         # Match: DTS-HD.MA or DTS-HD MA or DTS.HD.MA or DTS_HD_MA etc
-        if echo "$f" | grep -Eqi '\bdts[._-]?hd[._-]?ma\b'; then
+        if echo "$f" | grep -Eqi '\bdts[._ -]?hd[._ -]?ma\b'; then
             return 0
         fi
     fi
 
     return 1
+}
+
+################################################################################
+# RELEASE GROUP RECOVERY FROM GRAB HISTORY
+################################################################################
+
+# Result variable — set by fix_release_group_from_history() on success.
+# Using a global avoids the log-via-tee stdout contamination that would
+# occur if we returned the value via echo inside a $() capture.
+_RECOVER_RESULT=""
+
+# Extract release group from filename (text after last hyphen before extension)
+# Filters out codecs, resolutions, and multi-part audio fragments.
+_extract_group_from_filename() {
+    local filepath="$1"
+    local filename
+    filename=$(basename "$filepath")
+    local base="${filename%.*}"
+    [[ "$base" != *-* ]] && return 1
+    local candidate="${base##*-}"
+    [ -z "$candidate" ] && return 1
+    [[ "$candidate" == *.* ]] && return 1
+    [[ "$candidate" == *" "* ]] && return 1
+    local lower="${candidate,,}"
+    case "$lower" in
+        h264|h265|x264|x265|hevc|avc|vc1|remux) return 1 ;;
+        dl|hd) return 1 ;;
+    esac
+    [[ "$lower" =~ ^[0-9]+(p|i)$ ]] && return 1
+    echo "$candidate"
+    return 0
+}
+
+# Find import-verified grab from history (walks newest-to-oldest, skips failed grabs)
+# Return codes: 0 = found group (echoed), 1 = no verified grab, 2 = verified but empty group
+_find_imported_grab_group() {
+    local history_json="$1"
+    local movie_title="$2"
+    local movie_year="$3"
+    local event_count
+    event_count=$(echo "$history_json" | jq '(. // []) | length' 2>/dev/null) || event_count=0
+    [ "$event_count" -eq 0 ] && return 1
+    # Note: empty releaseGroup uses sentinel __NONE__ to prevent bash read
+    # from collapsing consecutive tabs (IFS=tab treats adjacent tabs as one)
+    local events_tsv
+    events_tsv=$(echo "$history_json" | jq -r '
+        (. // []) | sort_by(.date) | reverse | .[] |
+        [.eventType, ((.data.releaseGroup // "" | if . == "" then "__NONE__" else . end)), (.sourceTitle // "")] | @tsv
+    ') || return 1
+    local state="unknown"
+    while IFS=$'\t' read -r event_type grab_rg source_title; do
+        case "$event_type" in
+            downloadFolderImported|movieFileImported) state="imported" ;;
+            downloadFailed) state="failed" ;;
+            grabbed)
+                if [ "$state" = "failed" ]; then state="unknown"; continue; fi
+                if [ "$state" != "imported" ]; then state="unknown"; continue; fi
+                # First verified grab = the one that produced the current file.
+                # If empty, stop here — do NOT fall back to older grabs (different files).
+                if [ "$grab_rg" = "__NONE__" ]; then
+                    return 2
+                fi
+                local source_lower="${source_title,,}" title_lower="${movie_title,,}"
+                local title_word
+                title_word=$(echo "$title_lower" | sed -E 's/^(the|a|an) //' | awk '{print $1}')
+                local year_valid=false title_valid=false
+                [ -n "$movie_year" ] && [ "$movie_year" != "0" ] && [ "$movie_year" != "null" ] && year_valid=true
+                [ -n "$title_word" ] && [ "${#title_word}" -ge 3 ] && title_valid=true
+                local year_match=false title_match=false
+                if [ "$year_valid" = "true" ] && \
+                   echo "$source_title" | grep -wq "$movie_year"; then year_match=true; fi
+                if [ "$title_valid" = "true" ] && \
+                   echo "$source_lower" | grep -Fqi "$title_word"; then title_match=true; fi
+                local verified=false
+                if [ "$year_valid" = "true" ] && [ "$title_valid" = "true" ]; then
+                    [ "$year_match" = "true" ] && [ "$title_match" = "true" ] && verified=true
+                else
+                    [ "$year_match" = "true" ] || [ "$title_match" = "true" ] && verified=true
+                fi
+                if [ "$verified" = "true" ]; then echo "$grab_rg"; return 0; fi
+                state="unknown"
+                ;;
+        esac
+    done <<< "$events_tsv"
+    return 1
+}
+
+fix_release_group_from_history() {
+    local movie_id="$1"
+    local movie_title="$2"
+    local movie_year="$3"
+    local current_rg="$4"
+    local moviefile_id="$5"
+    local rel_path="${6:-}"
+
+    _RECOVER_RESULT=""
+
+    # Only act on empty/Unknown release groups
+    if [ -n "$current_rg" ] && [ "$current_rg" != "Unknown" ] && [ "$current_rg" != "null" ]; then
+        return 1
+    fi
+
+    log "INFO" "Release group missing/unknown — checking safety chain..."
+
+    # SAFETY: Check if the filename already has a release group
+    # If Radarr has none but the filename does, something is wrong — don't touch it
+    if [ -n "$rel_path" ]; then
+        local filename_group=""
+        filename_group=$(_extract_group_from_filename "$rel_path") || true
+        if [ -n "$filename_group" ]; then
+            log "WARN" "Filename has release group '${filename_group}' but Radarr has none — skipping fix"
+            log "INFO" "File: $rel_path"
+            return 1
+        fi
+    fi
+
+    # Query ALL history (not just grabs) for import verification
+    local history_json
+    history_json=$(curl -s -f "${PRIMARY_RADARR_API_URL}/history/movie?movieId=${movie_id}&apikey=${PRIMARY_RADARR_API_KEY}") || history_json=""
+
+    if [ -z "$history_json" ] || [ "$history_json" = "null" ] || [ "$history_json" = "[]" ] || \
+       ! echo "$history_json" | jq -e 'type == "array"' > /dev/null 2>&1; then
+        log "INFO" "No history found for movie"
+        return 1
+    fi
+
+    # Find import-verified grab (walks history newest-to-oldest, skips failed grabs)
+    local grab_rg="" find_rc=0
+    grab_rg=$(_find_imported_grab_group "$history_json" "$movie_title" "$movie_year") || find_rc=$?
+
+    if [ -z "$grab_rg" ]; then
+        if [ "$find_rc" -eq 2 ]; then
+            log "INFO" "Grab verified — No-RlsGroup"
+        else
+            log "INFO" "No verified grab found in history"
+        fi
+        return 1
+    fi
+
+    log "INFO" "Found verified releaseGroup '$grab_rg' from grab history"
+
+    if [ -z "$moviefile_id" ] || [ "$moviefile_id" = "null" ]; then
+        log "WARN" "Cannot determine movieFile ID — skipping fix"
+        return 1
+    fi
+
+    # Fetch full moviefile object for PUT
+    local moviefile_json
+    moviefile_json=$(curl -s -f "${PRIMARY_RADARR_API_URL}/moviefile/${moviefile_id}?apikey=${PRIMARY_RADARR_API_KEY}") || moviefile_json=""
+
+    if [ -z "$moviefile_json" ] || [ "$moviefile_json" = "null" ]; then
+        log "WARN" "Failed to fetch moviefile object — skipping fix"
+        return 1
+    fi
+
+    # Patch releaseGroup and PUT
+    local updated_moviefile
+    updated_moviefile=$(echo "$moviefile_json" | jq --arg rg "$grab_rg" '.releaseGroup = $rg')
+
+    local put_response put_http_code
+    put_response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X PUT \
+        "${PRIMARY_RADARR_API_URL}/moviefile/${moviefile_id}?apikey=${PRIMARY_RADARR_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "$updated_moviefile")
+    put_http_code=$(echo "$put_response" | grep "HTTP_CODE:" | tail -1 | cut -d: -f2)
+
+    if [ "$put_http_code" != "200" ] && [ "$put_http_code" != "202" ]; then
+        log "WARN" "Failed to update moviefile releaseGroup (HTTP $put_http_code)"
+        return 1
+    fi
+
+    log "INFO" "Fixed releaseGroup: '$grab_rg' applied to moviefile $moviefile_id"
+
+    # Trigger rename so the file reflects the corrected releaseGroup
+    local rename_response rename_http_code
+    rename_response=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+        "${PRIMARY_RADARR_API_URL}/command?apikey=${PRIMARY_RADARR_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"RenameFiles\",\"movieId\":${movie_id},\"files\":[${moviefile_id}]}")
+    rename_http_code=$(echo "$rename_response" | grep "HTTP_CODE:" | tail -1 | cut -d: -f2)
+
+    if [ "$rename_http_code" = "200" ] || [ "$rename_http_code" = "201" ]; then
+        log "INFO" "Rename command triggered for movie $movie_id"
+    else
+        log "WARN" "Rename command failed (HTTP $rename_http_code) — file may need manual rename"
+    fi
+
+    _RECOVER_RESULT="$grab_rg"
+    return 0
 }
 
 ################################################################################
@@ -322,8 +555,7 @@ fi
 MOVIE_TITLE=$(echo "$movie_json" | jq -r '.title')
 MOVIE_YEAR=$(echo "$movie_json" | jq -r '.year')
 MOVIE_TMDB_ID=$(echo "$movie_json" | jq -r '.tmdbId')
-MOVIE_IMDB_ID=$(echo "$movie_json" | jq -r '.imdbId // ""')
-MOVIE_CURRENT_TAGS=$(echo "$movie_json" | jq -r '.tags')
+MOVIE_CURRENT_TAGS=$(echo "$movie_json" | jq -r '(.tags // [])')
 
 # Get poster URL (try multiple sources)
 MOVIE_POSTER_URL=""
@@ -370,6 +602,20 @@ fi
 # Get file info for matching
 RELEASE_GROUP_FIELD=$(echo "$movie_json" | jq -r '.movieFile.releaseGroup // ""')
 
+# --- Release group recovery from grab history ---
+if [ "${ENABLE_RECOVER:-true}" = "true" ] && \
+   { [ -z "$RELEASE_GROUP_FIELD" ] || [ "$RELEASE_GROUP_FIELD" = "Unknown" ] || [ "$RELEASE_GROUP_FIELD" = "null" ]; }; then
+    _moviefile_id=$(echo "$movie_json" | jq -r '.movieFile.id // ""')
+    _rel_path=$(echo "$movie_json" | jq -r '.movieFile.relativePath // ""')
+    if fix_release_group_from_history "$MOVIE_ID" "$MOVIE_TITLE" "$MOVIE_YEAR" "$RELEASE_GROUP_FIELD" "$_moviefile_id" "$_rel_path"; then
+        RELEASE_GROUP_FIELD="$_RECOVER_RESULT"
+        MOVIE_RELEASE_GROUP="$_RECOVER_RESULT"
+        RECOVER_GROUP="$_RECOVER_RESULT"
+        log "INFO" "Proceeding with recovered releaseGroup: $_RECOVER_RESULT"
+    fi
+fi
+# --- End release group recovery ---
+
 # Combine all sources for searching
 COMBINED_NAME="${MOVIE_FILE_RELATIVE} ${MOVIE_FILE_SCENE}"
 COMBINED_LOWER=$(echo "$COMBINED_NAME" | tr '[:upper:]' '[:lower:]')
@@ -409,7 +655,7 @@ for tag_config in "${RELEASE_GROUPS[@]}"; do
 
     # Get or create tag in primary
     primary_tag_id=$(curl -s "${PRIMARY_RADARR_API_URL}/tag?apikey=${PRIMARY_RADARR_API_KEY}" | \
-        jq -r ".[] | select(.label == \"${TAG_NAME}\") | .id")
+        jq -r "(. // []) | .[] | select(.label == \"${TAG_NAME}\") | .id")
 
     if [ -z "$primary_tag_id" ]; then
         log "INFO" "Creating tag '$TAG_NAME' in $PRIMARY_RADARR_NAME..."
@@ -421,7 +667,7 @@ for tag_config in "${RELEASE_GROUPS[@]}"; do
     fi
 
     # Check if movie currently has this tag
-    movie_has_tag=$(echo "$MOVIE_CURRENT_TAGS" | jq "contains([${primary_tag_id}])")
+    movie_has_tag=$(echo "$MOVIE_CURRENT_TAGS" | jq "(. // []) | contains([${primary_tag_id}])")
 
     # Determine if movie SHOULD have this tag
     should_have_tag=false
@@ -511,9 +757,9 @@ if [ "${ENABLE_DISCOVERY:-false}" = "true" ] && [ -n "$RELEASE_GROUP_FIELD" ] &&
             discovered_group="$RELEASE_GROUP_FIELD"
 
             # Detect quality detail
-            if echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bma[._-]web'; then
+            if echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bma(\]?\s*\[?|[._-])web'; then
                 discovered_quality="MA WEB-DL"
-            elif echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bplay[._-]web'; then
+            elif echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bplay(\]?\s*\[?|[._-])web'; then
                 discovered_quality="Play WEB-DL"
             else
                 discovered_quality="Unknown WEB-DL"
@@ -526,7 +772,7 @@ if [ "${ENABLE_DISCOVERY:-false}" = "true" ] && [ -n "$RELEASE_GROUP_FIELD" ] &&
                 discovered_audio="DTS-X"
             elif echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\btruehd\b'; then
                 discovered_audio="TrueHD"
-            elif echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bdts[._-]?hd[._-]?ma\b'; then
+            elif echo "$MOVIE_FILE_RELATIVE" | grep -Eqi '\bdts[._ -]?hd[._ -]?ma\b'; then
                 discovered_audio="DTS-HD.MA"
             else
                 discovered_audio="Lossless audio"
@@ -534,36 +780,59 @@ if [ "${ENABLE_DISCOVERY:-false}" = "true" ] && [ -n "$RELEASE_GROUP_FIELD" ] &&
 
             log "INFO" "DISCOVERED: $discovered_group ($discovered_quality + $discovered_audio)"
 
-            # Write commented entry to config file
+            # Write entry to config file (commented or active based on AUTO_TAG_DISCOVERED)
             today=$(date '+%Y-%m-%d')
             rg_key="${rg_lower}"
-            insert_line="    #\"${rg_key}:${rg_key}:${discovered_group}:filtered\"              # Discovered ${today}: ${discovered_quality} + ${discovered_audio}"
+            if [ "${AUTO_TAG_DISCOVERED:-false}" = "true" ]; then
+                insert_line="    \"${rg_key}:${rg_key}:${discovered_group}:filtered\"              # Discovered ${today}: ${discovered_quality} + ${discovered_audio}"
+            else
+                insert_line="    #\"${rg_key}:${rg_key}:${discovered_group}:filtered\"              # Discovered ${today}: ${discovered_quality} + ${discovered_audio}"
+            fi
 
-            # Find the closing ) of RELEASE_GROUPS array
-            rg_start_line=$(grep -n 'RELEASE_GROUPS=(' "$CONFIG_FILE" | head -n1 | cut -d: -f1)
+            # Find the closing ) of RELEASE_GROUPS array (locked to prevent concurrent write corruption)
+            (
+                flock -w 10 200 || { echo "LOCK_FAIL"; exit 1; }
 
-            if [ -n "$rg_start_line" ]; then
-                rg_close_line=$(tail -n +"$rg_start_line" "$CONFIG_FILE" | grep -n '^)' | head -n1 | cut -d: -f1)
+                rg_start_line=$(grep -n 'RELEASE_GROUPS=(' "$CONFIG_FILE" | head -n1 | cut -d: -f1)
 
-                if [ -n "$rg_close_line" ]; then
-                    # Convert to absolute line number
-                    rg_close_line=$(( rg_start_line + rg_close_line - 1 ))
+                if [ -n "$rg_start_line" ]; then
+                    rg_close_line=$(tail -n +"$rg_start_line" "$CONFIG_FILE" | grep -n '^)' | head -n1 | cut -d: -f1)
 
-                    # Insert before the closing )
-                    tmp_file="${CONFIG_FILE}.tmp"
-                    {
-                        head -n $(( rg_close_line - 1 )) "$CONFIG_FILE"
-                        echo "$insert_line"
-                        tail -n +"$rg_close_line" "$CONFIG_FILE"
-                    } > "$tmp_file"
-                    mv "$tmp_file" "$CONFIG_FILE"
+                    if [ -n "$rg_close_line" ]; then
+                        rg_close_line=$(( rg_start_line + rg_close_line - 1 ))
+                        tmp_file="${CONFIG_FILE}.tmp"
+                        {
+                            head -n $(( rg_close_line - 1 )) "$CONFIG_FILE"
+                            echo "$insert_line"
+                            tail -n +"$rg_close_line" "$CONFIG_FILE"
+                        } > "$tmp_file"
+                        mv "$tmp_file" "$CONFIG_FILE"
+                    fi
+                fi
+            ) 200>"${CONFIG_FILE}.lock"
 
-                    log "INFO" "Written discovered group to config: $discovered_group"
-                else
-                    log "WARN" "Could not find closing ) for RELEASE_GROUPS in config"
+            if grep -q "$rg_key" "$CONFIG_FILE" 2>/dev/null; then
+                log "INFO" "Written discovered group to config: $discovered_group"
+
+                # Auto-tag: immediately tag the current movie with the discovered group
+                if [ "${AUTO_TAG_DISCOVERED:-false}" = "true" ]; then
+                    log "INFO" "Auto-tagging: creating and applying tag '$rg_key'"
+                    auto_tag_id=$(curl -s "${PRIMARY_RADARR_API_URL}/tag?apikey=${PRIMARY_RADARR_API_KEY}" | \
+                        jq -r "(. // []) | .[] | select(.label == \"${rg_key}\") | .id")
+                    if [ -z "$auto_tag_id" ]; then
+                        auto_tag_id=$(curl -s -X POST "${PRIMARY_RADARR_API_URL}/tag?apikey=${PRIMARY_RADARR_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"label\": \"${rg_key}\"}" | jq -r '.id')
+                    fi
+                    if [ -n "$auto_tag_id" ] && [ "$auto_tag_id" != "null" ]; then
+                        tags_to_add+=("${rg_key}:${auto_tag_id}:${discovered_group}")
+                        log "INFO" "Auto-tag queued: $discovered_group (ID: $auto_tag_id)"
+                    else
+                        log "WARN" "Auto-tag failed: could not create tag '$rg_key'"
+                    fi
                 fi
             else
-                log "WARN" "Could not find RELEASE_GROUPS=( in config"
+                log "WARN" "Failed to write discovered group to config"
             fi
         elif [ "${ENABLE_DEBUG:-false}" = "true" ]; then
             log "DEBUG" "Discovery: '$RELEASE_GROUP_FIELD' failed filters — not discovered"
@@ -582,11 +851,11 @@ if [ ${#tags_to_add[@]} -gt 0 ]; then
 
     # Get fresh movie object
     movie_full=$(curl -s "${PRIMARY_RADARR_API_URL}/movie/${MOVIE_ID}?apikey=${PRIMARY_RADARR_API_KEY}")
-    current_tags=$(echo "$movie_full" | jq -r '.tags')
+    current_tags=$(echo "$movie_full" | jq -r '(.tags // [])')
 
     for tag_info in "${tags_to_add[@]}"; do
         tag_id=$(echo "$tag_info" | cut -d: -f2)
-        current_tags=$(echo "$current_tags" | jq ". += [${tag_id}] | unique")
+        current_tags=$(echo "$current_tags" | jq "(. // []) + [${tag_id}] | unique")
     done
 
     # Update movie with new tags
@@ -604,11 +873,11 @@ if [ ${#tags_to_remove[@]} -gt 0 ]; then
 
     # Get fresh movie object
     movie_full=$(curl -s "${PRIMARY_RADARR_API_URL}/movie/${MOVIE_ID}?apikey=${PRIMARY_RADARR_API_KEY}")
-    current_tags=$(echo "$movie_full" | jq -r '.tags')
+    current_tags=$(echo "$movie_full" | jq -r '(.tags // [])')
 
     for tag_info in "${tags_to_remove[@]}"; do
         tag_id=$(echo "$tag_info" | cut -d: -f2)
-        current_tags=$(echo "$current_tags" | jq "del(.[] | select(. == ${tag_id}))")
+        current_tags=$(echo "$current_tags" | jq "(. // []) | del(.[] | select(. == ${tag_id}))")
     done
 
     # Update movie with cleaned tags
@@ -631,11 +900,11 @@ if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
 
     # Find movie in secondary by TMDb ID
     secondary_movie=$(curl -s "${SECONDARY_RADARR_API_URL}/movie?apikey=${SECONDARY_RADARR_API_KEY}" | \
-        jq -c ".[] | select(.tmdbId == ${MOVIE_TMDB_ID})")
+        jq -c "(. // []) | .[] | select(.tmdbId == ${MOVIE_TMDB_ID})")
 
     if [ -n "$secondary_movie" ]; then
         secondary_movie_id=$(echo "$secondary_movie" | jq -r '.id')
-        secondary_current_tags=$(echo "$secondary_movie" | jq -r '.tags')
+        secondary_current_tags=$(echo "$secondary_movie" | jq -r '(.tags // [])')
 
         log "INFO" "Found movie in $SECONDARY_RADARR_NAME (ID: $secondary_movie_id)"
 
@@ -645,7 +914,7 @@ if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
 
             # Get or create tag in secondary
             secondary_tag_id=$(curl -s "${SECONDARY_RADARR_API_URL}/tag?apikey=${SECONDARY_RADARR_API_KEY}" | \
-                jq -r ".[] | select(.label == \"${tag_name}\") | .id")
+                jq -r "(. // []) | .[] | select(.label == \"${tag_name}\") | .id")
 
             if [ -z "$secondary_tag_id" ]; then
                 new_tag=$(curl -s -X POST "${SECONDARY_RADARR_API_URL}/tag?apikey=${SECONDARY_RADARR_API_KEY}" \
@@ -654,7 +923,7 @@ if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
                 secondary_tag_id=$(echo "$new_tag" | jq -r '.id')
             fi
 
-            secondary_current_tags=$(echo "$secondary_current_tags" | jq ". += [${secondary_tag_id}] | unique")
+            secondary_current_tags=$(echo "$secondary_current_tags" | jq "(. // []) + [${secondary_tag_id}] | unique")
         done
 
         # Remove tags in secondary
@@ -662,10 +931,10 @@ if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
             tag_name=$(echo "$tag_info" | cut -d: -f1)
 
             secondary_tag_id=$(curl -s "${SECONDARY_RADARR_API_URL}/tag?apikey=${SECONDARY_RADARR_API_KEY}" | \
-                jq -r ".[] | select(.label == \"${tag_name}\") | .id")
+                jq -r "(. // []) | .[] | select(.label == \"${tag_name}\") | .id")
 
             if [ -n "$secondary_tag_id" ]; then
-                secondary_current_tags=$(echo "$secondary_current_tags" | jq "del(.[] | select(. == ${secondary_tag_id}))")
+                secondary_current_tags=$(echo "$secondary_current_tags" | jq "(. // []) | del(.[] | select(. == ${secondary_tag_id}))")
             fi
         done
 
@@ -727,99 +996,60 @@ log "INFO" "============================================"
 ################################################################################
 
 tagged=$( [ ${#tags_to_add[@]} -gt 0 ] || [ ${#tags_to_keep[@]} -gt 0 ] && echo true || echo false )
+recover_done=$( [ -n "${RECOVER_GROUP:-}" ] && echo true || echo false )
 
-# Handle Radarr Test event — always send a confirmation notification
-if [ "$DISCORD_ENABLED" = "true" ] && [ "$EVENT_TYPE" = "Test" ]; then
-    log "INFO" "Sending Discord test notification..."
-
-    payload=$(jq -n \
-        --argjson color 16753920 \
-        --arg footer_text "Tagarr Import • $(date '+%d-%m-%Y %H:%M')" \
-        --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
-        '{
-            embeds: [{
-                title: "Tagarr Import v'"${SCRIPT_VERSION}"' — Test OK",
-                color: $color,
-                fields: [
-                    { name: "Status", value: "Connection successful", inline: true },
-                    { name: "Discovery", value: "'"${ENABLE_DISCOVERY:-false}"'", inline: true }
-                ],
-                footer: { text: $footer_text },
-                timestamp: $timestamp
-            }]
-        }')
-
-    response=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST "$DISCORD_WEBHOOK_URL" \
-        -H "Content-Type: application/json" \
-        -d "$payload")
-
-    http_code=$(echo "$response" | grep "HTTP_CODE:" | cut -d: -f2)
-
-    if [ "$http_code" = "204" ] || [ "$http_code" = "200" ]; then
-        log "INFO" "Discord test notification sent successfully"
-    else
-        log "WARN" "Discord test notification failed (HTTP $http_code)"
-    fi
-
-    log "INFO" "Script completed successfully"
-    exit 0
-fi
-
-if [ "$DISCORD_ENABLED" = "true" ] && { [ "$tagged" = "true" ] || [ "$discovered" = "true" ]; }; then
+if [ "${DISCORD_ENABLED:-false}" = "true" ] && { [ "$tagged" = "true" ] || [ "$discovered" = "true" ] || [ "$recover_done" = "true" ]; }; then
     log "INFO" "Sending Discord notification..."
 
     # Determine title and color
     if [ "$tagged" = "true" ] && [ "$discovered" = "true" ]; then
         notif_title="Tagged + Discovered - ${MOVIE_TITLE} (${MOVIE_YEAR})"
         notif_color=16753920  # Orange (0xFFA500)
+    elif [ "$tagged" = "true" ] && [ "$recover_done" = "true" ]; then
+        notif_title="Tagged + Fixed - ${MOVIE_TITLE} (${MOVIE_YEAR})"
+        notif_color=16753920  # Orange (0xFFA500)
     elif [ "$discovered" = "true" ]; then
         notif_title="Discovered - ${MOVIE_TITLE} (${MOVIE_YEAR})"
         notif_color=16766720  # Gold (0xFFD700)
+    elif [ "$recover_done" = "true" ]; then
+        notif_title="Release Group Fixed - ${MOVIE_TITLE} (${MOVIE_YEAR})"
+        notif_color=3066993   # Green (0x2ECC71)
     else
         notif_title="Tagged - ${MOVIE_TITLE} (${MOVIE_YEAR})"
         notif_color=16753920  # Orange (0xFFA500)
     fi
 
-    # Build tag summary
-    tag_summary=""
-    if [ -n "$tags_added_list" ]; then
-        tag_summary="${tags_added_list}"
-    fi
-    if [ -n "$tags_kept_list" ]; then
-        if [ -n "$tag_summary" ]; then
-            tag_summary="${tag_summary}, ${tags_kept_list}"
-        else
-            tag_summary="${tags_kept_list}"
-        fi
-    fi
-    [ -z "$tag_summary" ] && tag_summary="None"
+    # Build fields array dynamically — only include relevant fields
+    fields_json='[]'
 
-    # Build instance info
-    instance_value=""
+    # Tag fields — only when tagged
     if [ "$tagged" = "true" ]; then
-        if [ "$SECONDARY_STATUS" = "synced" ]; then
-            instance_value="${PRIMARY_RADARR_NAME} + ${SECONDARY_RADARR_NAME}"
-        else
-            instance_value="${PRIMARY_RADARR_NAME}"
+        tag_summary=""
+        [ -n "$tags_added_list" ] && tag_summary="${tags_added_list}"
+        if [ -n "$tags_kept_list" ]; then
+            [ -n "$tag_summary" ] && tag_summary="${tag_summary}, ${tags_kept_list}" || tag_summary="${tags_kept_list}"
         fi
-    else
-        instance_value="None"
+
+        instance_value="${PRIMARY_RADARR_NAME}"
+        [ "$SECONDARY_STATUS" = "synced" ] && instance_value="${PRIMARY_RADARR_NAME} + ${SECONDARY_RADARR_NAME}"
+
+        fields_json=$(echo "$fields_json" | jq \
+            --arg instance "$instance_value" \
+            --arg tags "$tag_summary" \
+            '. += [
+                { name: "Tagged in", value: $instance, inline: false },
+                { name: "Tags Applied", value: $tags, inline: true }
+            ]')
     fi
 
-    # Build fields array — base fields always present
-    fields_json=$(jq -n \
-        --arg instance_value "$instance_value" \
-        --arg tag_summary "$tag_summary" \
-        --arg event_type "$EVENT_TYPE" \
-        --arg filename "$MOVIE_FILE_RELATIVE" \
-        '[
-            { name: "Tagged in", value: $instance_value, inline: false },
-            { name: "Tags Applied", value: $tag_summary, inline: true },
-            { name: "Event", value: $event_type, inline: true },
-            { name: "Filename", value: $filename, inline: false }
-        ]')
+    # Recovery field — only when release group was recovered
+    if [ "$recover_done" = "true" ]; then
+        fields_json=$(echo "$fields_json" | jq \
+            --arg recovered "$RECOVER_GROUP" \
+            '. += [{ name: "Release Group Fixed", value: $recovered, inline: true }]')
+    fi
 
-    # Add discovery field if applicable
+    # Discovery field
     if [ "$discovered" = "true" ]; then
         discovery_value="${discovered_group} — added to config"
         fields_json=$(echo "$fields_json" | jq \
@@ -827,13 +1057,25 @@ if [ "$DISCORD_ENABLED" = "true" ] && { [ "$tagged" = "true" ] || [ "$discovered
             '. += [{ name: "Discovered Group", value: $disc_value, inline: false }]')
     fi
 
+    # Filename from Radarr env var (pre-rename — rename executes after script exits)
+    notif_filename="$MOVIE_FILE_RELATIVE"
+
+    # Event + filename — always present
+    fields_json=$(echo "$fields_json" | jq \
+        --arg event_type "$EVENT_TYPE" \
+        --arg filename "$notif_filename" \
+        '. += [
+            { name: "Event", value: $event_type, inline: true },
+            { name: "Filename", value: $filename, inline: false }
+        ]')
+
     # Build Discord embed payload
     payload=$(jq -n \
         --arg title "$notif_title" \
         --argjson color "$notif_color" \
         --arg poster_url "$MOVIE_POSTER_URL" \
         --argjson fields "$fields_json" \
-        --arg footer_text "Tagarr Import • $(date '+%d-%m-%Y %H:%M')" \
+        --arg footer_text "Tagarr Import v${SCRIPT_VERSION} by ProphetSe7en" \
         --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
         '{
             embeds: [{
@@ -861,8 +1103,8 @@ if [ "$DISCORD_ENABLED" = "true" ] && { [ "$tagged" = "true" ] || [ "$discovered
     else
         log "WARN" "Discord notification failed (HTTP $http_code)"
     fi
-elif [ "$DISCORD_ENABLED" = "true" ]; then
-    log "INFO" "No tags applied and nothing discovered - skipping Discord notification"
+elif [ "${DISCORD_ENABLED:-false}" = "true" ]; then
+    log "INFO" "Nothing to report - skipping Discord notification"
 fi
 
 log "INFO" "Script completed successfully"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
 # Tagarr — Radarr Release Group Tagger with Discovery
-# Version: 1.0.0
+# Version: 1.2.0
 #
 # Scans movies in one or two Radarr instances and tags them based on release
 # group, quality source (MA/Play WEB-DL), and lossless audio codec (TrueHD,
@@ -17,6 +17,18 @@
 #   CLEANUP    — Remove tags with 0 movies at end of run (optional)
 #   DEBUG      — Detailed per-movie file/quality/audio breakdown (optional)
 #
+# Usage:
+#   tagarr.sh [OPTIONS]
+#
+# Options:
+#   --help       Show this help message and exit
+#   --dry-run    Simulate all changes without modifying Radarr
+#   --tag NAME   Only process specific tags (comma-separated)
+#   --discover   Run discovery only — scan for new release groups without
+#                tagging or modifying any tags. Discovered groups are written
+#                to the config as commented entries, logged, and sent to
+#                Discord (if enabled). Implies --dry-run for tagging only.
+#
 # Based on tag_and_sync.sh v5.4.1. Configuration: tagarr.conf
 #
 # Author: prophetSe7en
@@ -26,7 +38,7 @@
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.2.0"
 
 ########################################
 # CONFIG LOADING
@@ -66,12 +78,27 @@ discovered_groups[_]=1; unset "discovered_groups[_]"
 ########################################
 
 DRY_RUN=false
+DISCOVER_ONLY=false
 SELECTED_TAGS=()
+
+show_help() {
+  sed -n '/^# Usage:/,/^# Based on/{ /^# Based on/d; s/^# \?//p }' "$0"
+  exit 0
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h)
+      show_help
+      ;;
     --dry-run)
       DRY_RUN=true
+      shift
+      ;;
+    --discover)
+      DISCOVER_ONLY=true
+      DRY_RUN=true
+      ENABLE_DISCOVERY=true
       shift
       ;;
     --tag)
@@ -83,7 +110,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "Unknown argument: $1"
+      echo "Unknown argument: $1 (use --help for usage)"
       exit 1
       ;;
   esac
@@ -151,7 +178,7 @@ send_discord_summary() {
 
   local notif_color=16753920  # Orange (0xFFA500)
   local timestamp=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-  local footer_text="Tagarr • $(date '+%d-%m-%Y %H:%M')"
+  local footer_text="Tagarr v${SCRIPT_VERSION} by ProphetSe7en"
 
   # Build primary field value with actual newline
   local primary_value="Tagged: ${total_primary_tagged}
@@ -399,7 +426,7 @@ send_discord_discovery() {
 
   local notif_color=16766720  # Gold (0xFFD700)
   local timestamp=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-  local footer_text="Tagarr • $(date '+%d-%m-%Y %H:%M')"
+  local footer_text="Tagarr v${SCRIPT_VERSION} by ProphetSe7en"
 
   local payload
   payload=$(jq -n \
@@ -460,21 +487,20 @@ check_quality_match() {
   local f="$1"
   [ "$ENABLE_QUALITY_FILTER" != "true" ] && return 0
 
-  # STRICT: Only match MA/Play WEB-DL patterns
-  # Uses word boundaries (\b) to prevent matching "AMZN" as "MA" or "IMAX" as "MA"
-  # Supports various separators: . - _
-  # Pattern: (word boundary)(ma|play)(separator)web(dl variants)(separator)
+  # Match MA/Play WEB-DL patterns across naming schemes:
+  #   Standard:  MA.WEB-DL  MA-WEBDL  MA_WEB.DL
+  #   Bracket:   [MA][WEBDL-2160p]  [MA][WEB-DL]
+  # Separator between source and WEB: . - _ ][ or ]\s*[
+  # Uses word boundaries (\b) to prevent "AMZN" matching as "MA" or "IMAX" as "MA"
 
   if [ "$ENABLE_MA_WEBDL" = "true" ]; then
-    # Match: MA.WEBDL- or MA-WEBDL. or MA_WEBDL- or MA.WEB-DL. etc
-    if echo "$f" | grep -Eqi '\bma[._-]web([-.]?dl)?[._-]'; then
+    if echo "$f" | grep -Eqi '\bma(\]?\s*\[?|[._-])web([-.]?dl)?'; then
       return 0
     fi
   fi
 
   if [ "$ENABLE_PLAY_WEBDL" = "true" ]; then
-    # Match: Play.WEBDL- or Play-WEBDL. or Play_WEBDL- or Play.WEB-DL. etc
-    if echo "$f" | grep -Eqi '\bplay[._-]web([-.]?dl)?[._-]'; then
+    if echo "$f" | grep -Eqi '\bplay(\]?\s*\[?|[._-])web([-.]?dl)?'; then
       return 0
     fi
   fi
@@ -516,7 +542,7 @@ check_audio_match() {
   # DTS-HD MA check - supports various separators
   if [ "$ENABLE_DTS_HD_MA" = "true" ]; then
     # Match: DTS-HD.MA or DTS-HD MA or DTS.HD.MA or DTS_HD_MA etc
-    if echo "$f" | grep -Eqi '\bdts[._-]?hd[._-]?ma\b'; then
+    if echo "$f" | grep -Eqi '\bdts[._ -]?hd[._ -]?ma\b'; then
       return 0
     fi
   fi
@@ -596,7 +622,7 @@ main() {
           if [ -n "$stmdb" ] && [ "$stmdb" != "null" ]; then
             secondary_by_tmdb["$stmdb"]="$sid:$stags"
           fi
-        done < <(echo "$secondary_movies_json" | jq -r '.[] | [.id, .tmdbId, (.tags|tostring)] | @tsv')
+        done < <(echo "$secondary_movies_json" | jq -r '(. // []) | .[] | [.id, .tmdbId, ((.tags // [])|tostring)] | @tsv')
 
         log "Built hashmap with ${#secondary_by_tmdb[@]} entries (TMDb → ID:tags)"
 
@@ -646,46 +672,30 @@ main() {
   for cfg in "${RELEASE_GROUPS[@]}"; do
     IFS=':' read -r search tag_name display_name mode <<< "$cfg"
 
-    # PRIMARY TAG
+    # PRIMARY TAG — lookup only, no creation (tags are created lazily when needed)
     local pid
-    pid=$(echo "$existing_primary_tags" | jq -r --arg t "$tag_name" '.[] | select(.label==$t).id' | head -n1)
+    pid=$(echo "$existing_primary_tags" | jq -r --arg t "$tag_name" '(. // []) | .[] | select(.label==$t).id' | head -n1)
 
-    if [[ -z "$pid" || "$pid" == "null" ]]; then
-      if [ "$DRY_RUN" = false ]; then
-        pid=$(curl -s -X POST -H "Content-Type: application/json" \
-          -d "{\"label\":\"${tag_name}\"}" \
-          "${PRIMARY_RADARR_URL}/api/v3/tag?apikey=${PRIMARY_RADARR_API_KEY}" | jq -r '.id')
-        log "Created tag '$tag_name' in ${PRIMARY_RADARR_NAME} (ID: $pid)"
-      else
-        pid="999999"
-        log "[DRY‑RUN] Would create tag '$tag_name' in ${PRIMARY_RADARR_NAME}"
-      fi
-    else
+    if [[ -n "$pid" && "$pid" != "null" ]]; then
       log "Using existing tag '$tag_name' (ID: $pid) in ${PRIMARY_RADARR_NAME}"
+      primary_tag_ids["$tag_name"]="$pid"
+    else
+      log "Tag '$tag_name' not found in ${PRIMARY_RADARR_NAME} (will create if needed)"
+      primary_tag_ids["$tag_name"]=""
     fi
 
-    primary_tag_ids["$tag_name"]="$pid"
-
-    # SECONDARY TAG
+    # SECONDARY TAG — lookup only
     if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
       local sid
-      sid=$(echo "$existing_secondary_tags" | jq -r --arg t "$tag_name" '.[] | select(.label==$t).id' | head -n1)
+      sid=$(echo "$existing_secondary_tags" | jq -r --arg t "$tag_name" '(. // []) | .[] | select(.label==$t).id' | head -n1)
 
-      if [[ -z "$sid" || "$sid" == "null" ]]; then
-        if [ "$DRY_RUN" = false ]; then
-          sid=$(curl -s -X POST -H "Content-Type: application/json" \
-            -d "{\"label\":\"${tag_name}\"}" \
-            "${SECONDARY_RADARR_URL}/api/v3/tag?apikey=${SECONDARY_RADARR_API_KEY}" | jq -r '.id')
-          log "Created tag '$tag_name' in ${SECONDARY_RADARR_NAME} (ID: $sid)"
-        else
-          sid="999999"
-          log "[DRY‑RUN] Would create tag '$tag_name' in ${SECONDARY_RADARR_NAME}"
-        fi
-      else
+      if [[ -n "$sid" && "$sid" != "null" ]]; then
         log "Using existing tag '$tag_name' (ID: $sid) in ${SECONDARY_RADARR_NAME}"
+        secondary_tag_ids["$tag_name"]="$sid"
+      else
+        log "Tag '$tag_name' not found in ${SECONDARY_RADARR_NAME} (will create if needed)"
+        secondary_tag_ids["$tag_name"]=""
       fi
-
-      secondary_tag_ids["$tag_name"]="$sid"
     fi
   done
 
@@ -757,7 +767,7 @@ main() {
     )"
 
     local tags_array
-    tags_array=$(echo "$movie" | jq -c '.tags')
+    tags_array=$(echo "$movie" | jq -c '(.tags // [])')
 
     # Build combined string for QUALITY/AUDIO filters
     # Use ALL available data for maximum information
@@ -821,9 +831,9 @@ main() {
             q_ok=true
             quality_result="PASS"
             # Detect which quality
-            if echo "$combined_for_filters" | grep -Eqi '\bma[._-]web'; then
+            if echo "$combined_for_filters" | grep -Eqi '\bma(\]?\s*\[?|[._-])web'; then
               quality_detail="MA WEB-DL"
-            elif echo "$combined_for_filters" | grep -Eqi '\bplay[._-]web'; then
+            elif echo "$combined_for_filters" | grep -Eqi '\bplay(\]?\s*\[?|[._-])web'; then
               quality_detail="Play WEB-DL"
             else
               quality_detail="Unknown"
@@ -831,9 +841,9 @@ main() {
           else
             quality_result="FAIL"
             # Detect why it failed
-            if echo "$combined_for_filters" | grep -Eqi '\bamzn[._-]web'; then
+            if echo "$combined_for_filters" | grep -Eqi '\bamzn(\]?\s*\[?|[._-])web'; then
               quality_detail="AMZN (not MA/Play)"
-            elif echo "$combined_for_filters" | grep -Eqi '\bnf[._-]web'; then
+            elif echo "$combined_for_filters" | grep -Eqi '\bnf(\]?\s*\[?|[._-])web'; then
               quality_detail="Netflix (not MA/Play)"
             elif echo "$combined_for_filters" | grep -Eqi '\bweb'; then
               quality_detail="Plain WEB-DL (no MA/Play prefix)"
@@ -852,7 +862,7 @@ main() {
               audio_detail="DTS-X"
             elif echo "$combined_for_filters" | grep -Eqi '\btruehd\b'; then
               audio_detail="TrueHD"
-            elif echo "$combined_for_filters" | grep -Eqi '\bdts[._-]?hd[._-]?ma\b'; then
+            elif echo "$combined_for_filters" | grep -Eqi '\bdts[._ -]?hd[._ -]?ma\b'; then
               audio_detail="DTS-HD.MA"
             else
               audio_detail="Lossless audio"
@@ -886,9 +896,11 @@ main() {
       fi
 
       # Check if movie currently HAS this tag
-      local primary_tag_id="${primary_tag_ids[$tag_name]}"
-      local has_tag
-      has_tag=$(echo "$tags_array" | jq --argjson id "$primary_tag_id" 'index($id) != null')
+      local primary_tag_id="${primary_tag_ids[$tag_name]:-}"
+      local has_tag="false"
+      if [ -n "$primary_tag_id" ]; then
+        has_tag=$(echo "$tags_array" | jq --argjson id "$primary_tag_id" 'index($id) != null')
+      fi
 
       # Add/Keep/Remove logic
       if [ "$should_have" = true ]; then
@@ -989,7 +1001,7 @@ main() {
           sec_id="${sec_data%%:*}"
           sec_tags="${sec_data#*:}"
 
-          local secondary_tag_id="${secondary_tag_ids[$tag_name]}"
+          local secondary_tag_id="${secondary_tag_ids[$tag_name]:-}"
           local sec_has_tag=false
 
           # DEBUG: Log tag checking for first 3
@@ -1001,7 +1013,7 @@ main() {
           fi
 
           # Use grep with word boundaries (v2.1 method that works)
-          if echo "$sec_tags" | grep -q "\b${secondary_tag_id}\b"; then
+          if [ -n "$secondary_tag_id" ] && echo "$sec_tags" | grep -q "\b${secondary_tag_id}\b"; then
             sec_has_tag=true
           fi
 
@@ -1089,9 +1101,9 @@ main() {
 
         if check_quality_match "$combined_for_filters"; then
           disc_q_ok=true
-          if echo "$combined_for_filters" | grep -Eqi '\bma[._-]web'; then
+          if echo "$combined_for_filters" | grep -Eqi '\bma(\]?\s*\[?|[._-])web'; then
             disc_quality_detail="MA WEB-DL"
-          elif echo "$combined_for_filters" | grep -Eqi '\bplay[._-]web'; then
+          elif echo "$combined_for_filters" | grep -Eqi '\bplay(\]?\s*\[?|[._-])web'; then
             disc_quality_detail="Play WEB-DL"
           else
             disc_quality_detail="Unknown WEB-DL"
@@ -1106,7 +1118,7 @@ main() {
             disc_audio_detail="DTS-X"
           elif echo "$combined_for_filters" | grep -Eqi '\btruehd\b'; then
             disc_audio_detail="TrueHD"
-          elif echo "$combined_for_filters" | grep -Eqi '\bdts[._-]?hd[._-]?ma\b'; then
+          elif echo "$combined_for_filters" | grep -Eqi '\bdts[._ -]?hd[._ -]?ma\b'; then
             disc_audio_detail="DTS-HD.MA"
           else
             disc_audio_detail="Lossless audio"
@@ -1133,7 +1145,12 @@ main() {
       fi
     fi
 
-  done < <(echo "$movies_json" | jq -c '.[]')
+  done < <(echo "$movies_json" | jq -c '(. // []) | .[]')
+
+  if [ "$DISCOVER_ONLY" = true ]; then
+    log ""
+    log "${CYAN}Discovery-only mode — skipping tag changes${RESET}"
+  else
 
   ########################################
   # SECONDARY ORPHANED TAG CLEANUP
@@ -1152,14 +1169,16 @@ main() {
       )"
 
       local sec_tags_array
-      sec_tags_array=$(echo "$sec_movie" | jq -c '.tags')
+      sec_tags_array=$(echo "$sec_movie" | jq -c '(.tags // [])')
 
       [ -z "$sec_tmdb_id" ] || [ "$sec_tmdb_id" = "null" ] && continue
 
       for cfg in "${RELEASE_GROUPS[@]}"; do
         IFS=':' read -r search tag_name display_name mode <<< "$cfg"
 
-        local secondary_tag_id="${secondary_tag_ids[$tag_name]}"
+        local secondary_tag_id="${secondary_tag_ids[$tag_name]:-}"
+        [ -z "$secondary_tag_id" ] && continue
+
         local sec_has_this_tag
         sec_has_this_tag=$(echo "$sec_tags_array" | jq --argjson id "$secondary_tag_id" 'index($id) != null')
 
@@ -1191,7 +1210,7 @@ main() {
         fi
       done
 
-    done < <(echo "$secondary_movies_json" | jq -c '.[]')
+    done < <(echo "$secondary_movies_json" | jq -c '(. // []) | .[]')
 
     log "Found $orphan_count orphaned tags in ${SECONDARY_RADARR_NAME}"
   fi
@@ -1206,22 +1225,29 @@ main() {
   for cfg in "${RELEASE_GROUPS[@]}"; do
     IFS=':' read -r search tag_name display_name mode <<< "$cfg"
 
-    local primary_tag_id="${primary_tag_ids[$tag_name]}"
+    local primary_tag_id="${primary_tag_ids[$tag_name]:-}"
     local secondary_tag_id="${secondary_tag_ids[$tag_name]:-}"
-
-    # SAFETY GUARD
-    if [[ -z "${primary_tag_ids[$tag_name]:-}" ]]; then
-      log "${RED}SAFETY GUARD: refusing to modify unknown primary tag '$tag_name'${RESET}"
-      continue
-    fi
 
     local p_add="${primary_to_add[$tag_name]:-}"
     local p_remove="${primary_to_remove[$tag_name]:-}"
     local s_add="${secondary_to_add[$tag_name]:-}"
     local s_remove="${secondary_to_remove[$tag_name]:-}"
 
-    # PRIMARY ADD
+    # PRIMARY ADD — create tag lazily if it doesn't exist yet
     if [ -n "$p_add" ]; then
+      if [ -z "$primary_tag_id" ]; then
+        if [ "$DRY_RUN" = false ]; then
+          primary_tag_id=$(curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"label\":\"${tag_name}\"}" \
+            "${PRIMARY_RADARR_URL}/api/v3/tag?apikey=${PRIMARY_RADARR_API_KEY}" | jq -r '.id')
+          primary_tag_ids["$tag_name"]="$primary_tag_id"
+          log "Created tag '$tag_name' in ${PRIMARY_RADARR_NAME} (ID: $primary_tag_id)"
+        else
+          primary_tag_id="999999"
+          primary_tag_ids["$tag_name"]="999999"
+          log "[DRY-RUN] Would create tag '$tag_name' in ${PRIMARY_RADARR_NAME}"
+        fi
+      fi
       local ids_json
       ids_json=$(printf '%s\n' $p_add | jq -s '.')
       if [ "$DRY_RUN" = false ]; then
@@ -1231,8 +1257,8 @@ main() {
       fi
     fi
 
-    # PRIMARY REMOVE
-    if [ -n "$p_remove" ]; then
+    # PRIMARY REMOVE — only if tag exists in Radarr
+    if [ -n "$p_remove" ] && [ -n "$primary_tag_id" ]; then
       local ids_json2
       ids_json2=$(printf '%s\n' $p_remove | jq -s '.')
       if [ "$DRY_RUN" = false ]; then
@@ -1246,10 +1272,23 @@ main() {
     # SECONDARY SYNC APPLY
     ########################################
 
-    if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ] && [ -n "$secondary_tag_id" ]; then
+    if [ "$ENABLE_SYNC_TO_SECONDARY" = "true" ]; then
 
-      # SECONDARY ADD
+      # SECONDARY ADD — create tag lazily if it doesn't exist yet
       if [ -n "$s_add" ]; then
+        if [ -z "$secondary_tag_id" ]; then
+          if [ "$DRY_RUN" = false ]; then
+            secondary_tag_id=$(curl -s -X POST -H "Content-Type: application/json" \
+              -d "{\"label\":\"${tag_name}\"}" \
+              "${SECONDARY_RADARR_URL}/api/v3/tag?apikey=${SECONDARY_RADARR_API_KEY}" | jq -r '.id')
+            secondary_tag_ids["$tag_name"]="$secondary_tag_id"
+            log "Created tag '$tag_name' in ${SECONDARY_RADARR_NAME} (ID: $secondary_tag_id)"
+          else
+            secondary_tag_id="999999"
+            secondary_tag_ids["$tag_name"]="999999"
+            log "[DRY-RUN] Would create tag '$tag_name' in ${SECONDARY_RADARR_NAME}"
+          fi
+        fi
         local s_ids_json
         s_ids_json=$(printf '%s\n' $s_add | jq -s '.')
         if [ "$DRY_RUN" = false ]; then
@@ -1259,8 +1298,8 @@ main() {
         fi
       fi
 
-      # SECONDARY REMOVE
-      if [ -n "$s_remove" ]; then
+      # SECONDARY REMOVE — only if tag exists in Radarr
+      if [ -n "$s_remove" ] && [ -n "$secondary_tag_id" ]; then
         local s_ids_json2
         s_ids_json2=$(printf '%s\n' $s_remove | jq -s '.')
         if [ "$DRY_RUN" = false ]; then
@@ -1274,6 +1313,8 @@ main() {
 
   done
 
+  fi  # end DISCOVER_ONLY gate
+
   ########################################
   # WRITE DISCOVERIES TO CONFIG
   ########################################
@@ -1285,7 +1326,7 @@ main() {
     local today
     today=$(date '+%Y-%m-%d')
 
-    if [ "$DRY_RUN" = true ]; then
+    if [ "$DRY_RUN" = true ] && [ "$DISCOVER_ONLY" = false ]; then
       log "${YELLOW}[DRY-RUN] Would write ${#discovered_groups[@]} discovered groups to config:${RESET}"
       for rg_key in "${!discovered_groups[@]}"; do
         local disc_data="${discovered_groups[$rg_key]}"
@@ -1936,7 +1977,10 @@ ${chunk_list}\`\`\`"
   # CLEANUP UNUSED TAGS
   ########################################
 
-  if [ "$CLEANUP_UNUSED_TAGS" = "true" ]; then
+  if [ "$DISCOVER_ONLY" = true ]; then
+    log ""
+    log "${CYAN}Discovery-only mode — skipping tag cleanup${RESET}"
+  elif [ "$CLEANUP_UNUSED_TAGS" = "true" ]; then
     log ""
     log "${CYAN}========================================${RESET}"
     log "${CYAN}CLEANUP: Checking for unused tags${RESET}"
@@ -1951,7 +1995,7 @@ ${chunk_list}\`\`\`"
         # Count movies with this tag in primary
         local count
         count=$(curl -s "${PRIMARY_RADARR_URL}/api/v3/movie?apikey=${PRIMARY_RADARR_API_KEY}" | \
-          jq --argjson tid "$primary_tag_id" '[.[] | select(.tags | index($tid) != null)] | length')
+          jq --argjson tid "$primary_tag_id" '(. // []) | [.[] | select((.tags // []) | index($tid) != null)] | length')
 
         if [ "$count" = "0" ]; then
           log "${YELLOW}Tag '$tag_name' (ID: $primary_tag_id) has 0 movies in ${PRIMARY_RADARR_NAME}${RESET}"
@@ -1973,7 +2017,7 @@ ${chunk_list}\`\`\`"
         if [ -n "$secondary_tag_id" ] && [ "$secondary_tag_id" != "999999" ]; then
           local count_sec
           count_sec=$(curl -s "${SECONDARY_RADARR_URL}/api/v3/movie?apikey=${SECONDARY_RADARR_API_KEY}" | \
-            jq --argjson tid "$secondary_tag_id" '[.[] | select(.tags | index($tid) != null)] | length')
+            jq --argjson tid "$secondary_tag_id" '(. // []) | [.[] | select((.tags // []) | index($tid) != null)] | length')
 
           if [ "$count_sec" = "0" ]; then
             log "${YELLOW}Tag '$tag_name' (ID: $secondary_tag_id) has 0 movies in ${SECONDARY_RADARR_NAME}${RESET}"
