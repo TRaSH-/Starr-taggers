@@ -2,150 +2,43 @@
 
 Tagging scripts for the Starr apps.
 
+> [!NOTE]
+> These scripts were not written by me. They were created by other developers on request. All credit goes to the original developers.
+
+---
+
 ## Radarr DV HDR Tagarr
 
-Using `dovi_tool`, these scripts automatically tag your movies in Radarr based on their media file metadata. You can use these tags for various purposes, such as creating collections in Plex — with or without [Kometa](https://kometa.wiki/).
+This script is based on the original [Tag DV FEL/MEL Script](https://github.com/mvanbaak/arr_scripts/blob/main/radarr/connect/tag_dvfelmel.sh). All credit goes to the original developer.
 
-**Tags added:**
+**Features:**
 
-| Category      | Values                               |
-|---------------|--------------------------------------|
-| Color mapping | `CM2`, `CM4`                         |
-| Profile       | `DV P8`                              |
-| Layer type    | `MEL`, `FEL`                         |
-| Video format  | `SDR`, `PQ`, `HDR10`, `HDR10+`, `DV` |
+Using [`dovi_tool`](https://github.com/quietvoid/dovi_tool), these scripts automatically tag your movies in Radarr based on each file's metadata. You can use these tags for many purposes — for example, building collections in Plex, with or without [Kometa](https://kometa.wiki/).
 
-| Script                       | Description                                            |
-|------------------------------|--------------------------------------------------------|
-| `99-install_dependencies.sh` | Installs `dovi_tool` inside the container on startup   |
-| `dv-hdr_tagarr_import.sh`    | Tags movies automatically on import                    |
-| `dv-hdr_tagarr.sh`           | Standalone script to tag your existing movies manually |
-
----
-
-## Installation
-
-### 1. Set Up the Scripts
-
-In your Radarr `appdata` directory:
-
-1. Create a folder named `cont-init.d` and copy `99-install_dependencies.sh` into it.
-2. Create a folder named `scripts` and copy the two remaining scripts into it.
-3. Make all three files executable.
-4. Open each script and fill in the required configuration values as described in the file comments.
-
-**Example paths on unRAID:**
-
-|           | Path                                                              |
-|-----------|-------------------------------------------------------------------|
-| Container | `/etc/cont-init.d/99-install_dependencies.sh`                     |
-| Host      | `/mnt/user/appdata/radarr/cont-init.d/99-install_dependencies.sh` |
-
-> [!NOTE]
-> Enter the path directly — do not use a file picker to browse to it.
-
-### 2. Restart Radarr
-
-Restart your Radarr container so `dovi_tool` is installed on startup.
-
-### 3. Configure a Custom Script in Radarr
-
-Go to **Settings → Connect** and add a new **Custom Script** with the following settings:
-
-- **Tags:** Leave empty
-- **Path:** `/config/scripts/dv-hdr_tagarr_import.sh`
-
-Enable these triggers:
-
-- On File Import
-- On File Upgrade
-- On Movie File Delete
-- On Movie File Delete For Upgrade
-
-Click **Test**. If you see errors, check the following:
-
-- Radarr URL is correct
-- Radarr API key is correct
-- Scripts are marked as executable
-- `dovi_tool` is installed
-- File permissions are correct
-- File is saved with LF line endings, not CRLF
-
----
-
-## Tag Your Existing Media
-
-To tag movies you already have, run the standalone script from a terminal:
-
-```bash
-docker exec -it radarr /config/scripts/dv-hdr_tagarr.sh
-```
+📖 See the [Wiki](https://github.com/TRaSH-/Starr-taggers/wiki#radarr-dv-hdr-tagarr) for setup instructions.
 
 ---
 
 ## Tagarr
 
-Scans movies in one or two Radarr instances and tags them based on release group, quality source (MA/Play WEB-DL), and lossless audio codec (TrueHD, TrueHD Atmos, DTS-X, DTS-HD MA). Optionally syncs tags to a secondary Radarr instance and cleans up orphaned or empty tags.
+Automated movie tagging for Radarr based on release groups.
+
+Tagarr scans movies in one or two Radarr instances and tags them based on release group, quality source (MA/Play WEB-DL), and lossless audio codec (TrueHD, TrueHD Atmos, DTS-X, DTS-HD MA). It can also sync tags to a second Radarr instance and remove unused or empty tags.
 
 **Features:**
 
-| Feature     | Description                                                                                                                                                     |
-|-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TAGGING`   | Match movies by release group, quality, and audio filters                                                                                                       |
-| `SYNC`      | Mirror tags to a secondary Radarr instance (optional)                                                                                                           |
-| `DISCOVERY` | Auto-detect new release groups that pass all filters but aren't in the config yet. Writes them as commented entries for manual review and activation (optional) |
-| `CLEANUP`   | Remove tags with no movies at the end of each run (optional)                                                                                                    |
-| `DEBUG`     | Show a detailed per-movie breakdown of file, quality, and audio info (optional)                                                                                 |
+- 📚 **Build smart collections** — filter your library by release group quality
+- 👁️ **Track what you have** — see at a glance which movies came from premium groups
+- ✅ **Filter by quality** — only tag releases that meet your audio and video standards
+- 🔍 **Discover new groups** — automatically find new groups that pass your filters
+- 🔄 **Sync across instances** — mirror tags between your HD and 4K Radarr setups
+- 🛠️ **Recover release group info** (\*)
 
-> [!CAUTION]
-> This script creates and applies tags in Radarr. Review your config and test with `ENABLE_DEBUG=true` before scheduling unattended runs.
+> [!IMPORTANT]
+> Check the [original repo](https://github.com/ProphetSe7en/tagarr) for the most up-to-date scripts.
 
-| Script                      | Description                                   |
-|-----------------------------|-----------------------------------------------|
-| `tagarr.sh`                 | Standalone script to tag your existing movies |
-| `tagarr.conf.sample`        | Config file for the standalone version        |
-| `tagarr_import.sh`          | Tags movies automatically on import           |
-| `tagarr_import.conf.sample` | Config file for the import version            |
+📖 See the [original repo](https://github.com/ProphetSe7en/tagarr) or the [Wiki](https://github.com/TRaSH-/Starr-taggers/wiki#tagarr-release-group) for setup instructions.
 
 ---
 
-## Radarr Release Group Tagarr Installation
-
-### 1. Set Up the Tagarr Scripts
-
-In your Radarr `appdata` directory:
-
-1. Create a folder named `scripts` and copy both bash scripts and `.conf` files into it.
-2. Make both bash scripts executable.
-3. Rename both `.conf` files by removing `.sample` from the end.
-4. Open each `.conf` file and fill in the required configuration values as described in the file comments.
-
-### 2. Configure the Tagarr Custom Script in Radarr
-
-Go to **Settings → Connect** and add a new **Custom Script** with the following settings:
-
-- **Tags:** Leave empty
-- **Path:** `/config/scripts/tagarr_import.sh`
-
-Enable these triggers:
-
-- On File Import
-- On File Upgrade
-
-Click **Test**. If you see errors, check the following:
-
-- Radarr URL is correct
-- Radarr API key is correct
-- Scripts are marked as executable
-- File permissions are correct
-- File is saved with LF line endings, not CRLF
-
----
-
-## Tag Your Existing Media with Release Group Tagarr
-
-To tag movies you already have, run the standalone script from a terminal:
-
-```bash
-docker exec -it radarr /config/scripts/tagarr.sh
-```
+> (\*) **Release group recovery** requires Radarr to have a grab event in its history. Recovery will not work if the movie was imported manually (e.g. drag-and-drop or manual import), or if Radarr's history has been cleared — in both cases, the grab event no longer exists.
