@@ -9,7 +9,7 @@ Tagging scripts for the Starr apps.
 
 ## Radarr DV HDR Tagarr
 
-This script is based on the original [Tag DV FEL/MEL Script](https://github.com/mvanbaak/arr_scripts/blob/main/radarr/connect/tag_dvfelmel.sh). All credit goes to the original developer.
+This script is based on the original [Tag DV FEL/MEL Script](https://github.com/mvanbaak/arr_scripts). All credit goes to the original developer.
 
 **Features:**
 
