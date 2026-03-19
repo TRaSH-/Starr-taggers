@@ -183,7 +183,7 @@ extract_rpu() {
 
     local temp_rpu=$(mktemp)
 
-    ffmpeg -loglevel error -i "$file" -c:v copy -vbsf hevc_mp4toannexb -f hevc -frames:v 100 - 2>/dev/null | \
+    ffmpeg -loglevel error -i "$file" -c:v copy -bsf:v hevc_mp4toannexb -f hevc -frames:v 100 - 2>/dev/null | \
         dovi_tool extract-rpu - -o "$temp_rpu" >/dev/null 2>&1 || {
         rm -f "$temp_rpu"
         return 1

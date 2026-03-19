@@ -327,7 +327,7 @@ extract_rpu() {
     fi
     
     log "INFO" "  → Starting RPU extraction with timeout..."  
-    timeout "$RPU_EXTRACTION_TIMEOUT" ffmpeg -loglevel error -i "$file" -c:v copy -vbsf hevc_mp4toannexb -f hevc -frames:v "$MAX_FRAMES_ANALYZE" - 2>/dev/null | \
+    timeout "$RPU_EXTRACTION_TIMEOUT" ffmpeg -loglevel error -i "$file" -c:v copy -bsf:v hevc_mp4toannexb -f hevc -frames:v "$MAX_FRAMES_ANALYZE" - 2>/dev/null | \
         timeout "$RPU_EXTRACTION_TIMEOUT" dovi_tool extract-rpu - -o "$temp_rpu" 2>&1
     local extraction_result=$?
     
