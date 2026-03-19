@@ -26,7 +26,7 @@ LOG_FILE="/config/scripts/logs/dv-hdr_tagarr.log"
 # HOST_PATH="/mnt/user/data/media"
 
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" | tee -a "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" | tee -a "$LOG_FILE" >&2
 }
 
 translate_path() {

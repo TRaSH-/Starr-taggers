@@ -66,7 +66,7 @@ NEEDED_EXECUTABLES="curl dovi_tool ffmpeg grep jq mktemp"
 
 # ========== LOGGING ==========
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" | tee -a "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" | tee -a "$LOG_FILE" >&2
 }
 
 # ========== UTILITY FUNCTIONS ==========
